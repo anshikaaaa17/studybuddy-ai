@@ -11,11 +11,11 @@ CHUNK_SIZE    = 600
 CHUNK_OVERLAP = 100
 TOP_K         = 5
 # Model fallback chain — tries each if quota/404 hit
-GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.5-flash-lite"]
 GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 
 
-# ────── Lightweight TF-IDF vector store ──────────────────────────────────────────────────────────
+# ── Lightweight TF-IDF vector store ──────────────────────────────────────────
 
 class TFIDFVectorStore:
     def __init__(self):
@@ -56,7 +56,7 @@ class TFIDFVectorStore:
         return [self.chunks[i] for i, _ in scores[:min(k, len(self.chunks))]]
 
 
-# ────── Gemini API — model fallback + exponential backoff ────────────────────────────────────────
+# ── Gemini API — model fallback + exponential backoff ────────────────────────
 
 def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) -> str:
     payload = {
@@ -99,7 +99,7 @@ def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) ->
     )
 
 
-# ────── Main agent class ────────────────────────────────────────────────────────────────────────
+# ── Main agent class ──────────────────────────────────────────────────────────
 
 class StudyBuddyAgent:
 
@@ -113,37 +113,17 @@ class StudyBuddyAgent:
         re.IGNORECASE
     )
 
-    # Admin keywords for page-level filtering (consistent with _strip_admin_pages)
-    ADMIN_KEYWORDS = [
-        'office hours','email:','tutorial schedule','lecture schedule',
-        'course outline','grading','assessment','textbook','recommended reading',
-        'course coordinator','instructor','professor','guest lecture',
-        'attendance','plagiarism','academic integrity','late submission',
-        'course code','prerequisites','learning outcomes','nanyang','ntu','semester'
-    ]
-
     def __init__(self, api_key: str):
         self.api_key      = api_key
         self.store        = TFIDFVectorStore()
         self.doc_text     = ""
         self.total_chunks = 0
 
-    # ────── Ingestion ──────────────────────────────────────────────────────────────────────────
+    # ── Ingestion ─────────────────────────────────────────────────────────────
 
     def _is_admin_chunk(self, chunk: str) -> bool:
         hits = len(self.ADMIN_PATTERNS.findall(chunk))
         return hits >= 2 and len(chunk) < 700
-
-    def _is_admin_page(self, text: str) -> bool:
-        """Check if a full page should be filtered as admin content.
-        
-        Uses same logic as _strip_admin_pages() for consistency:
-        - Count admin keywords
-        - Filter if 3+ keywords AND page < 800 chars
-        """
-        body = text.lower()
-        hits = sum(1 for kw in self.ADMIN_KEYWORDS if kw in body)
-        return hits >= 3 and len(text.strip()) < 800
 
     def ingest_pdf(self, uploaded_file) -> int:
         pdf_bytes = uploaded_file.read()
@@ -178,7 +158,7 @@ class StudyBuddyAgent:
             start = end - CHUNK_OVERLAP
         return chunks
 
-    # ────── Retrieval ──────────────────────────────────────────────────────────────────────────
+    # ── Retrieval ─────────────────────────────────────────────────────────────
 
     def retrieve(self, query, k=TOP_K):
         return "\n\n---\n\n".join(self.store.query(query, k=k))
@@ -201,10 +181,9 @@ class StudyBuddyAgent:
                 break
         return "\n\n---\n\n".join(results[:k])
 
-    # ────── Q&A ────────────────────────────────────────────────────────────────────────────────
+    # ── Q&A ───────────────────────────────────────────────────────────────────
 
     def summarise_by_slide(self) -> str:
-        """FIX #3: Use _is_admin_page() for consistent filtering across full pages."""
         parts = re.split(r'(\[Page \d+\])', self.doc_text)
         pages = []
         i = 0
@@ -212,8 +191,7 @@ class StudyBuddyAgent:
             if re.match(r'\[Page \d+\]', parts[i]) and i+1 < len(parts):
                 num  = int(re.search(r'\d+', parts[i]).group())
                 text = parts[i+1].strip()
-                # FIX: Use _is_admin_page(text) instead of _is_admin_chunk(text[:700])
-                if text and not self._is_admin_page(text):
+                if text and not self._is_admin_chunk(text[:700]):
                     pages.append((num, text))
                 i += 2
             else:
@@ -266,7 +244,7 @@ FORMAT:
         user = f"Context:\n{ctx}\n\nQuestion: {question}"
         return call_gemini(self.api_key, system, user, max_tokens=1500)
 
-    # ────── Quiz ────────────────────────────────────────────────────────────────────────────────
+    # ── Quiz ──────────────────────────────────────────────────────────────────
 
     def _validate_quiz(self, text: str) -> bool:
         q_count = len(re.findall(r'\*\*Q[1-5]\.', text))
@@ -297,20 +275,15 @@ D) [option]
 
 Difficulty: Q1-Q2 easy, Q3-Q4 medium, Q5 hard."""
 
-        for attempt in range(2):
+        for attempt in range(3):
             extra = "" if attempt == 0 else f"\n\n[Attempt {attempt+1}: output ALL 5 questions with A B C D each.]"
-            try:
-                result = call_gemini(
-                    self.api_key, system,
-                    f"Generate all 5 questions from:\n\n{ctx}{extra}",
-                    max_tokens=2000
-                )
-                if self._validate_quiz(result):
-                    return result
-            except RuntimeError:
-                if attempt == 1:
-                    return "⚠️ Quiz generation failed. Please check your API quota and try again."
-        
+            result = call_gemini(
+                self.api_key, system,
+                f"Generate all 5 questions from:\n\n{ctx}{extra}",
+                max_tokens=3000
+            )
+            if self._validate_quiz(result):
+                return result
         if not self._validate_quiz(result):
             result += "\n\n---\n⚠️ *Quiz may be incomplete. Click Generate again for a fresh quiz.*"
         return result
@@ -328,10 +301,10 @@ Be encouraging. Max 4 sentences."""
         )
 
     def extract_topic(self, response: str):
-        m = re.search(r'Topic:\s*\[?([\ w\s\-]+)\]?', response, re.IGNORECASE)
+        m = re.search(r'Topic:\s*\[?([\w\s\-]+)\]?', response, re.IGNORECASE)
         return m.group(1).strip() if m else "General Review"
 
-    # ────── Summary ────────────────────────────────────────────────────────────────────────────
+    # ── Summary ───────────────────────────────────────────────────────────────
 
     def summarise(self) -> str:
         clean  = self._strip_admin_pages(self.doc_text)
@@ -369,15 +342,20 @@ Structure:
         )
 
     def _strip_admin_pages(self, text: str) -> str:
-        """Filter admin pages using ADMIN_KEYWORDS for consistency."""
+        admin_kw = [
+            'office hours','email:','tutorial schedule','lecture schedule',
+            'course outline','grading','assessment','textbook','recommended reading',
+            'course coordinator','instructor','professor','guest lecture',
+            'attendance','plagiarism','academic integrity','late submission',
+            'course code','prerequisites','learning outcomes','nanyang','ntu','semester'
+        ]
         pages  = re.split(r'(\[Page \d+\])', text)
         result = []
         i = 0
         while i < len(pages):
             if re.match(r'\[Page \d+\]', pages[i]) and i+1 < len(pages):
                 body = pages[i+1].lower()
-                hits = sum(1 for kw in self.ADMIN_KEYWORDS if kw in body)
-                # FIX #3: Consistent threshold (3+ keywords, <800 chars)
+                hits = sum(1 for kw in admin_kw if kw in body)
                 if hits >= 3 and len(pages[i+1].strip()) < 800:
                     i += 2
                     continue

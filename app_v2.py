@@ -376,17 +376,6 @@ with col_main:
             parts = _re.split(r'(?=\*\*Q\d+\.)', quiz_text.strip())
             return [p.strip() for p in parts if p.strip() and _re.match(r'\*\*Q\d+\.', p)]
 
-        def strip_answer_from_question(question_text):
-            """Remove the answer line from question text for display to user.
-            Keeps the full question with answer available for checking.
-            Example: "**Q1. ...\\nA) ...\\nB) ...\\nC) ...\\nD) ...\\n*(Answer: B – reason)*"
-            Returns: "**Q1. ...\\nA) ...\\nB) ...\\nC) ...\\nD) ..."
-            """
-            lines = question_text.split('\n')
-            while lines and lines[-1].strip().startswith('*(Answer:'):
-                lines.pop()
-            return '\n'.join(lines)
-
         # Init quiz state
         if "quiz_questions" not in st.session_state:
             st.session_state.quiz_questions = []
@@ -423,8 +412,7 @@ with col_main:
             if idx < total_q:
                 st.markdown(f"**Question {idx+1} of {total_q}**")
                 with st.chat_message("assistant"):
-                    # Display question WITHOUT the answer
-                    st.markdown(strip_answer_from_question(questions[idx]))
+                    st.markdown(questions[idx])
             else:
                 st.success("🎉 Quiz complete! Click Generate for a new quiz.")
         else:
