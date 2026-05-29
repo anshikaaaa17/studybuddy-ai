@@ -5,6 +5,7 @@ Voice-enabled via Web Speech API | Agent track | UCWS Singapore Hackathon 2026
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 from agent import StudyBuddyAgent
 
@@ -55,115 +56,95 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Voice component HTML (Web Speech API) ─────────────────────────────────────
-VOICE_COMPONENT = """
-<div style="margin: 8px 0 4px;">
-  <button class="voice-btn voice-idle" id="voiceBtn" onclick="toggleVoice()">
-    🎤 Click to speak
-  </button>
-  <span id="voiceStatus" style="font-size:12px; color:#6b7280; margin-left:8px;"></span>
-</div>
-<div id="transcript" style="
-    min-height:36px; padding:8px 12px; border-radius:8px;
-    background:#f0f2f6; font-size:14px; color:#1f2937;
-    margin-top:6px; border:1px solid #d1d5db; display:none;">
-</div>
-<div id="http-warning" style="
-    display:none; margin-top:6px; padding:8px 12px;
-    background:#fef3c7; border:1px solid #f59e0b;
-    border-radius:8px; font-size:12px; color:#92400e;">
-    ⚠️ Voice requires HTTPS. Works on Streamlit Cloud deployment.
-    <br>Locally: type your question in the chat box below instead.
-</div>
-
+VOICE_COMPONENT = """<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin: 0; padding: 8px; font-family: sans-serif; background: transparent; }
+  #voiceBtn {
+    background: #1e3a5f; color: #93c5fd;
+    border: 1px solid #3b82f6; padding: 8px 18px;
+    border-radius: 8px; font-size: 13px; font-weight: 600;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  }
+  #voiceBtn.listening { background: #7f1d1d; color: #fca5a5; border-color: #ef4444; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+  #status { font-size: 12px; color: #6b7280; margin-left: 8px; }
+  #box { margin-top: 8px; padding: 8px 12px; background: #f3f4f6; border-radius: 8px;
+         font-size: 13px; color: #111827; border: 1px solid #e5e7eb; display: none; min-height: 32px; }
+</style>
+</head>
+<body>
+<button id="voiceBtn" onclick="toggle()">🎤 Click to speak</button>
+<span id="status"></span>
+<div id="box"></div>
 <script>
-let recognition = null;
-let listening = false;
+let rec = null, going = false;
+const btn = document.getElementById('voiceBtn');
+const st  = document.getElementById('status');
+const box = document.getElementById('box');
 
-function toggleVoice() {
-    const isHttps = location.protocol === 'https:';
-    const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
-        document.getElementById('voiceStatus').textContent = '❌ Use Chrome browser for voice.';
-        return;
-    }
-    if (!isHttps && !isLocalhost) {
-        document.getElementById('http-warning').style.display = 'block';
-        return;
-    }
-    // On localhost HTTP, still try — Chrome may allow it
-    if (listening) {
-        recognition.stop();
-    } else {
-        startListening();
-    }
+function toggle() {
+  if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
+    st.textContent = '❌ Use Chrome for voice support.'; return;
+  }
+  going ? rec.stop() : start();
 }
 
-function startListening() {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognition = new SpeechRecognition();
-    recognition.lang = 'en-US';
-    recognition.interimResults = true;
-    recognition.continuous = false;
-
-    const btn = document.getElementById('voiceBtn');
-    const status = document.getElementById('voiceStatus');
-    const box = document.getElementById('transcript');
-    const warn = document.getElementById('http-warning');
-    warn.style.display = 'none';
-
-    recognition.onstart = () => {
-        listening = true;
-        btn.textContent = '🔴 Listening... click to stop';
-        btn.className = 'voice-btn voice-listen';
-        status.textContent = 'Speak now...';
-        box.style.display = 'block';
-        box.textContent = '...';
-    };
-
-    recognition.onresult = (event) => {
-        const transcript = Array.from(event.results)
-            .map(r => r[0].transcript).join('');
-        box.textContent = transcript;
-    };
-
-    recognition.onend = () => {
-        listening = false;
-        btn.textContent = '🎤 Click to speak';
-        btn.className = 'voice-btn voice-idle';
-        const finalText = box.textContent;
-        if (finalText && finalText !== '...') {
-            navigator.clipboard.writeText(finalText)
-                .then(() => { status.textContent = '✅ Copied! Paste into chat box below ↓'; })
-                .catch(() => { status.textContent = '✅ Spoken: paste text above into chat ↓'; });
-        } else {
-            status.textContent = 'No speech detected. Try again.';
-        }
-    };
-
-    recognition.onerror = (event) => {
-        listening = false;
-        btn.textContent = '🎤 Click to speak';
-        btn.className = 'voice-btn voice-idle';
-        if (event.error === 'not-allowed') {
-            status.textContent = '❌ Mic blocked. Allow mic in Chrome settings.';
-            document.getElementById('http-warning').style.display = 'block';
-        } else if (event.error === 'no-speech') {
-            status.textContent = 'No speech detected. Try again.';
-        } else {
-            status.textContent = '❌ Error: ' + event.error;
-        }
-    };
-
-    try {
-        recognition.start();
-    } catch(e) {
-        status.textContent = '❌ Could not start mic: ' + e.message;
-    }
+function start() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  rec = new SR();
+  rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = false;
+  rec.onstart = () => {
+    going = true;
+    btn.textContent = '🔴 Listening... click to stop';
+    btn.className = 'listening';
+    st.textContent = 'Speak now...';
+    box.style.display = 'block'; box.textContent = '...';
+  };
+  rec.onresult = e => {
+    box.textContent = Array.from(e.results).map(r => r[0].transcript).join('');
+  };
+  rec.onend = () => {
+    going = false;
+    btn.textContent = '🎤 Click to speak'; btn.className = '';
+    const txt = box.textContent;
+    if (txt && txt !== '...') {
+      navigator.clipboard.writeText(txt)
+        .then(() => st.textContent = '✅ Copied! Paste into chat below ↓')
+        .catch(() => st.textContent = '✅ Done — paste text above into chat ↓');
+    } else { st.textContent = 'No speech. Try again.'; }
+  };
+  rec.onerror = e => {
+    going = false; btn.textContent = '🎤 Click to speak'; btn.className = '';
+    st.textContent = e.error === 'not-allowed'
+      ? '❌ Mic blocked — allow mic in browser settings.'
+      : '❌ ' + e.error;
+  };
+  rec.start();
 }
+
+// TTS listener from parent
+window.addEventListener('message', e => {
+  if (!e.data || e.data.type !== 'sb_speak') return;
+  const text = e.data.text;
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const clean = text.replace(/[#*_`]/g,'').replace(/Source:[^\n]*/g,'').trim().slice(0,600);
+  const speak = () => {
+    const u = new SpeechSynthesisUtterance(clean);
+    u.rate = 0.92; u.lang = 'en-US';
+    const vs = speechSynthesis.getVoices();
+    const v = vs.find(v=>v.lang.startsWith('en')&&v.localService)||vs.find(v=>v.lang.startsWith('en'))||vs[0];
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  };
+  speechSynthesis.getVoices().length ? speak() : (speechSynthesis.onvoiceschanged = speak);
+});
 </script>
-"""
+</body>
+</html>"""
+
 
 TTS_SCRIPT = """
 <script>
@@ -330,7 +311,7 @@ with col_main:
 
         # Inject TTS script once
         if st.session_state.voice_enabled:
-            st.markdown(TTS_SCRIPT, unsafe_allow_html=True)
+            components.html(TTS_SCRIPT, height=0)
 
         # Chat history
         for msg in st.session_state.messages:
@@ -338,27 +319,19 @@ with col_main:
                 st.markdown(msg["content"])
 
         # Speak last response button
+        # Speak last response button
         if st.session_state.voice_enabled and st.session_state.last_response:
-            clean_tts = st.session_state.last_response.replace('"',' ').replace("'",' ').replace('\n',' ').replace('`','')[:500]
-            st.markdown(
-                f'''<button onclick="window._sbSpeak(\'{clean_tts}\')"
-                    style="background:#1e3a5f;color:#93c5fd;border:1px solid #3b82f6;
-                    padding:6px 16px;border-radius:8px;font-size:13px;cursor:pointer;margin:4px 0;">
-                    🔊 Read last answer aloud
-                </button>''', unsafe_allow_html=True)
-            if False:  # dummy
-                escaped = st.session_state.last_response.replace("'", "\\'").replace("\n", " ")[:500]
-                st.markdown(
-                    f"<script>speakText('{escaped}')</script>",
-                    unsafe_allow_html=True
-                )
-
-    # ── Q&A mode ──────────────────────────────────────────────────────────────
+            _tc = st.session_state.last_response.replace('"',' ').replace("'", ' ').replace('\n',' ').replace('`','')[:400]
+            components.html(
+                f'''<button onclick="Array.from(window.parent.document.querySelectorAll('iframe')).forEach(f=>{{try{{f.contentWindow.postMessage({{type:\'sb_speak\',text:\'{_tc}\'}},'*')}}catch(e){{}}}})" '''
+                'style="background:#1e3a5f;color:#93c5fd;border:1px solid #3b82f6;padding:6px 16px;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600;">🔊 Read last answer aloud</button>',
+                height=50
+            )
     if st.session_state.pdf_loaded and st.session_state.mode == "Q&A":
 
         # Voice input widget
         if st.session_state.voice_enabled:
-            st.markdown(VOICE_COMPONENT, unsafe_allow_html=True)
+            components.html(VOICE_COMPONENT, height=120)
             st.caption("💡 After speaking, your transcription is auto-copied — paste it into the chat box below.")
 
         prompt = st.chat_input("Ask anything about your slides...")
