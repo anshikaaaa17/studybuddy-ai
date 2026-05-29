@@ -358,12 +358,16 @@ with col_main:
                         else:
                             response = f"❌ Error: {err}"
                 st.markdown(response)
-                # Auto-speak if voice enabled
+                # Auto-speak via iframe postMessage (st.markdown strips scripts)
                 if st.session_state.voice_enabled:
-                    escaped = response.replace("'", "\\'").replace("\n", " ")[:500]
-                    st.markdown(
-                        f"<script>speakText('{escaped}')</script>",
-                        unsafe_allow_html=True
+                    escaped = response.replace("'", " ").replace('"', ' ').replace("\n", " ").replace("`", "")[:500]
+                    components.html(
+                        f"""<script>
+                        Array.from(window.parent.document.querySelectorAll('iframe')).forEach(f=>{{
+                            try{{f.contentWindow.postMessage({{type:'sb_speak',text:'{escaped}'}},'*')}}catch(e){{}}
+                        }});
+                        </script>""",
+                        height=0,
                     )
             st.session_state.messages.append({"role": "assistant", "content": response})
             st.session_state.last_response = response
@@ -403,9 +407,9 @@ with col_main:
             qs = parse_questions(quiz)
             if qs:
                 st.session_state.quiz_questions = qs
+                st.session_state.quiz_score["total"] += 5
             else:
                 st.session_state.messages.append({"role": "assistant", "content": quiz})
-            st.session_state.quiz_score["total"] += 5
             st.rerun()
 
         questions = st.session_state.get("quiz_questions", [])

@@ -119,6 +119,13 @@ def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) ->
                         return result["candidates"][0]["content"]["parts"][0]["text"]
                 except urllib.error.HTTPError as e:
                     body = e.read().decode()
+                    if e.code == 401:
+                        last_error = (
+                            f"[key …{key[-4:]}] Authentication failed — "
+                            "your AQ. token has expired. Please refresh your key at "
+                            "aistudio.google.com and update it in Streamlit secrets."
+                        )
+                        break  # no point retrying same key, try next
                     if e.code == 404:
                         last_error = f"[{model}] not found on this key"
                         break  # try next model (same key)
@@ -345,6 +352,7 @@ D) [option]
 
 Difficulty: Q1-Q2 easy, Q3-Q4 medium, Q5 hard."""
 
+        result = ""
         for attempt in range(2):
             extra = "" if attempt == 0 else f"\n\n[Attempt {attempt+1}: output ALL 5 questions with A B C D each.]"
             try:
@@ -376,7 +384,7 @@ Be encouraging. Max 4 sentences."""
         )
 
     def extract_topic(self, response: str):
-        m = re.search(r'Topic:\s*\[?([\ w\s\-]+)\]?', response, re.IGNORECASE)
+        m = re.search(r'Topic:\s*\[?([\w\s\-]+)\]?', response, re.IGNORECASE)
         return m.group(1).strip() if m else "General Review"
 
     # ────── Summary ────────────────────────────────────────────────────────────────────────────
