@@ -18,7 +18,6 @@ GEMINI_MODELS = [
     "gemini-2.0-flash",        # primary: fast, free tier 1500 req/day
     "gemini-2.0-flash-lite",   # fallback 1: lighter, higher quota headroom
     "gemini-1.5-flash",        # fallback 2: proven stable
-    "gemini-1.5-flash-8b",     # fallback 3: smallest/fastest, very high quota
 ]
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 
@@ -81,12 +80,24 @@ class TFIDFVectorStore:
 
 
 # ────── Gemini API — key pool × model fallback + exponential backoff ─────────────────────────────
-# Strategy for demo safety:
-#   Outer loop: each API key in the pool (primary key + up to 4 extras from secrets)
-#   Inner loop: each model in GEMINI_MODELS
-#   On 429 daily quota: move to next key (different quota bucket), not just next model
-#   On 429 rate limit (per-minute): exponential backoff, then retry same key+model
-#   On 404: model not available on this key's project, try next model
+# Supports TWO key formats:
+#   AIzaSy...  → standard REST API key, sent as ?key= query param
+#   AQ....     → OAuth2 bearer token (new AI Studio format), sent as Authorization: Bearer header
+# Strategy: outer loop = keys, inner loop = models. On daily quota, move to next KEY.
+
+GEMINI_URL_BEARER = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+def _make_request(model: str, key: str, data: bytes) -> urllib.request.Request:
+    """Build request supporting both AIzaSy (query param) and AQ. (Bearer token) key formats."""
+    if key.startswith("AIza"):
+        url     = GEMINI_URL.format(model=model, key=key)
+        headers = {"Content-Type": "application/json"}
+    else:
+        # AQ. / OAuth2 token — must use Authorization: Bearer header
+        url     = GEMINI_URL_BEARER.format(model=model)
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    return urllib.request.Request(url, data=data, headers=headers, method="POST")
+
 
 def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) -> str:
     payload = {
@@ -94,18 +105,13 @@ def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) ->
         "contents":           [{"role": "user", "parts": [{"text": user}]}],
         "generationConfig":   {"maxOutputTokens": max_tokens, "temperature": 0.2}
     }
-    key_pool  = _load_key_pool(api_key)
+    key_pool   = _load_key_pool(api_key)
     last_error = "no keys configured"
 
     for key in key_pool:
         for model in GEMINI_MODELS:
-            url  = GEMINI_URL.format(model=model, key=key)
             data = json.dumps(payload).encode("utf-8")
-            req  = urllib.request.Request(
-                url, data=data,
-                headers={"Content-Type": "application/json"},
-                method="POST"
-            )
+            req  = _make_request(model, key, data)
             for attempt in range(3):
                 try:
                     with urllib.request.urlopen(req, timeout=40) as resp:
