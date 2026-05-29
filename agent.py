@@ -11,7 +11,8 @@ CHUNK_SIZE    = 600
 CHUNK_OVERLAP = 100
 TOP_K         = 5
 # Model fallback chain — tries each if quota/404 hit
-GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.5-flash-lite"]
+# Updated: gemini-2.5-flash-lite → gemini-1.5-flash (widely available)
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
 GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 
 
@@ -93,9 +94,22 @@ def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) ->
                     time.sleep(4 * (2 ** attempt))
                     continue
                 raise RuntimeError(f"Gemini API error {e.code}: {body}") from e
+    
+    # Enhanced error message with diagnostic info
     raise RuntimeError(
-        f"All Gemini models failed. Last: {last_error}\n"
-        "Create a new API key at aistudio.google.com or wait until tomorrow."
+        f"❌ All Gemini models failed. Last: {last_error}\n\n"
+        "🔧 TROUBLESHOOTING STEPS:\n\n"
+        "1️⃣  **Verify your API key**\n"
+        "   • Go to aistudio.google.com\n"
+        "   • Sign in → Get API key → Create new key\n"
+        "   • Key should start with 'AIza'\n\n"
+        "2️⃣  **Check daily quota** (Free tier: 1500 requests/day)\n"
+        "   • View usage at aistudio.google.com/app/apidasboard\n"
+        "   • If exhausted: wait until tomorrow OR upgrade to paid\n\n"
+        "3️⃣  **Try again in 1 minute** (rate limit: 60 req/min)\n\n"
+        "4️⃣  **Upgrade to paid tier** for unlimited access\n"
+        "   • Visit https://aistudio.google.com/app/billing\n"
+        "   • Cost: ~$0.075/M input tokens, $0.30/M output tokens\n"
     )
 
 
@@ -256,6 +270,7 @@ FORMAT:
         return True
 
     def generate_quiz(self) -> str:
+        """Generate 5-question quiz with improved error handling."""
         ctx    = self.retrieve_conceptual(k=8)
         system = """You are StudyBuddy AI generating a multiple-choice quiz.
 
@@ -275,18 +290,40 @@ D) [option]
 
 Difficulty: Q1-Q2 easy, Q3-Q4 medium, Q5 hard."""
 
-        for attempt in range(3):
-            extra = "" if attempt == 0 else f"\n\n[Attempt {attempt+1}: output ALL 5 questions with A B C D each.]"
-            result = call_gemini(
-                self.api_key, system,
-                f"Generate all 5 questions from:\n\n{ctx}{extra}",
-                max_tokens=3000
-            )
-            if self._validate_quiz(result):
-                return result
-        if not self._validate_quiz(result):
-            result += "\n\n---\n⚠️ *Quiz may be incomplete. Click Generate again for a fresh quiz.*"
-        return result
+        try:
+            for attempt in range(2):  # Reduced from 3 to 2 attempts to save quota
+                extra = "" if attempt == 0 else f"\n\n[Attempt {attempt+1}: output ALL 5 questions with A B C D each.]"
+                result = call_gemini(
+                    self.api_key, system,
+                    f"Generate all 5 questions from:\n\n{ctx}{extra}",
+                    max_tokens=2000  # Reduced from 3000 to conserve quota
+                )
+                if self._validate_quiz(result):
+                    return result
+            
+            # If validation fails after retries, still return with warning
+            if not self._validate_quiz(result):
+                result += "\n\n---\n⚠️ *Quiz may be incomplete. Click Generate again for a fresh quiz.*"
+            return result
+        
+        except RuntimeError as e:
+            # Graceful fallback: return helpful error instead of crashing
+            return f"""⚠️ **Quiz Generation Failed**
+
+{str(e)}
+
+**Why this happens:**
+• Your daily API quota is exhausted (1500 requests/day, free tier)
+• Your API key is invalid or revoked
+• Network connectivity issue
+
+**What to do:**
+1. Check your API key at aistudio.google.com
+2. If quota exceeded, wait until tomorrow
+3. Or upgrade to paid API (see link above)
+4. Try another feature (Q&A or Summary) to test your key
+
+*Click "Generate" again after fixing the issue.*"""
 
     def check_answer(self, student_answer: str, context: str) -> str:
         system = """You are StudyBuddy AI checking a quiz answer.
@@ -304,7 +341,7 @@ Be encouraging. Max 4 sentences."""
         m = re.search(r'Topic:\s*\[?([\w\s\-]+)\]?', response, re.IGNORECASE)
         return m.group(1).strip() if m else "General Review"
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # ── Summary ───────────────────────────────────────────────────────────
 
     def summarise(self) -> str:
         clean  = self._strip_admin_pages(self.doc_text)
