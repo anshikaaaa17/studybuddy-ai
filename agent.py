@@ -10,9 +10,33 @@ import fitz  # PyMuPDF
 CHUNK_SIZE    = 600
 CHUNK_OVERLAP = 100
 TOP_K         = 5
-# Model fallback chain — tries each if quota/404 hit
-GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
-GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+
+# ── Demo-safe model list ──────────────────────────────────────────────────────
+# Order: fastest/newest first, older models as fallbacks.
+# gemini-2.0-flash-lite has very high RPM — ideal last-resort fallback.
+GEMINI_MODELS = [
+    "gemini-2.0-flash",        # primary: fast, free tier 1500 req/day
+    "gemini-2.0-flash-lite",   # fallback 1: lighter, higher quota headroom
+    "gemini-1.5-flash",        # fallback 2: proven stable
+    "gemini-1.5-flash-8b",     # fallback 3: smallest/fastest, very high quota
+]
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+
+# ── Multi-key pool ────────────────────────────────────────────────────────────
+# Load extra demo keys from Streamlit secrets (GEMINI_API_KEY_2, _3, etc.)
+# Falls back gracefully if secrets not available (local dev).
+def _load_key_pool(primary_key: str) -> list:
+    """Return deduplicated list of API keys: primary first, then extras from secrets."""
+    keys = [primary_key] if primary_key else []
+    try:
+        import streamlit as st
+        for i in range(2, 8):  # looks for GEMINI_API_KEY_2 through _7
+            k = st.secrets.get(f"GEMINI_API_KEY_{i}", "")
+            if k and k not in keys:
+                keys.append(k)
+    except Exception:
+        pass
+    return keys
 
 
 # ────── Lightweight TF-IDF vector store ──────────────────────────────────────────────────────────
@@ -56,46 +80,64 @@ class TFIDFVectorStore:
         return [self.chunks[i] for i, _ in scores[:min(k, len(self.chunks))]]
 
 
-# ────── Gemini API — model fallback + exponential backoff ────────────────────────────────────────
+# ────── Gemini API — key pool × model fallback + exponential backoff ─────────────────────────────
+# Strategy for demo safety:
+#   Outer loop: each API key in the pool (primary key + up to 4 extras from secrets)
+#   Inner loop: each model in GEMINI_MODELS
+#   On 429 daily quota: move to next key (different quota bucket), not just next model
+#   On 429 rate limit (per-minute): exponential backoff, then retry same key+model
+#   On 404: model not available on this key's project, try next model
 
 def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) -> str:
     payload = {
         "system_instruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": user}]}],
-        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2}
+        "contents":           [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig":   {"maxOutputTokens": max_tokens, "temperature": 0.2}
     }
-    last_error = None
-    for model in GEMINI_MODELS:
-        url  = GEMINI_URL.format(model=model, key=api_key)
-        data = json.dumps(payload).encode("utf-8")
-        req  = urllib.request.Request(
-            url, data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        for attempt in range(3):
-            try:
-                with urllib.request.urlopen(req, timeout=40) as resp:
-                    result = json.loads(resp.read().decode())
-                    return result["candidates"][0]["content"]["parts"][0]["text"]
-            except urllib.error.HTTPError as e:
-                body = e.read().decode()
-                if e.code == 404:
-                    last_error = f"[{model}] not found"
-                    break  # try next model
-                if e.code == 429:
-                    if "PerDay" in body or "per_day" in body.lower() or "quota" in body.lower():
-                        last_error = f"[{model}] daily quota exceeded"
-                        break  # try next model
-                    time.sleep(4 * (2 ** attempt))
-                    continue
-                if e.code == 503 and attempt < 2:
-                    time.sleep(4 * (2 ** attempt))
-                    continue
-                raise RuntimeError(f"Gemini API error {e.code}: {body}") from e
+    key_pool  = _load_key_pool(api_key)
+    last_error = "no keys configured"
+
+    for key in key_pool:
+        for model in GEMINI_MODELS:
+            url  = GEMINI_URL.format(model=model, key=key)
+            data = json.dumps(payload).encode("utf-8")
+            req  = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            for attempt in range(3):
+                try:
+                    with urllib.request.urlopen(req, timeout=40) as resp:
+                        result = json.loads(resp.read().decode())
+                        return result["candidates"][0]["content"]["parts"][0]["text"]
+                except urllib.error.HTTPError as e:
+                    body = e.read().decode()
+                    if e.code == 404:
+                        last_error = f"[{model}] not found on this key"
+                        break  # try next model (same key)
+                    if e.code == 429:
+                        is_daily = (
+                            "PerDay" in body
+                            or "per_day" in body.lower()
+                            or "quota" in body.lower()
+                            or "RESOURCE_EXHAUSTED" in body
+                        )
+                        if is_daily:
+                            last_error = f"[key …{key[-4:]}][{model}] daily quota exceeded"
+                            break  # exhausted this model on this key; try next model
+                        # Per-minute rate limit — wait and retry
+                        time.sleep(4 * (2 ** attempt))
+                        continue
+                    if e.code == 503 and attempt < 2:
+                        time.sleep(4 * (2 ** attempt))
+                        continue
+                    raise RuntimeError(f"Gemini API error {e.code}: {body[:200]}") from e
+        # All models exhausted on this key → try next key in pool
+
     raise RuntimeError(
-        f"All Gemini models failed. Last: {last_error}\n"
-        "Create a new API key at aistudio.google.com or wait until tomorrow."
+        f"All API keys and models exhausted. Last error: {last_error}\n"
+        "Add GEMINI_API_KEY_2 / _3 in Streamlit secrets, or wait until midnight UTC."
     )
 
 
