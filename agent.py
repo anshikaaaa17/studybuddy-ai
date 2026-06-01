@@ -13,6 +13,48 @@ TOP_K         = 5
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"]
 GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
+# ── Acronym expansion for better TF-IDF retrieval ────────────────────────────
+ACRONYMS = {
+    "nlp": "natural language processing",
+    "ml":  "machine learning",
+    "dl":  "deep learning",
+    "nn":  "neural network",
+    "cnn": "convolutional neural network",
+    "rnn": "recurrent neural network",
+    "lstm":"long short term memory",
+    "gan": "generative adversarial network",
+    "svm": "support vector machine",
+    "knn": "k nearest neighbors",
+    "pca": "principal component analysis",
+    "ai":  "artificial intelligence",
+    "llm": "large language model",
+    "rag": "retrieval augmented generation",
+    "sgd": "stochastic gradient descent",
+    "relu":"rectified linear unit",
+    "api": "application programming interface",
+    "db":  "database",
+    "sql": "structured query language",
+    "oop": "object oriented programming",
+}
+
+def expand_query(query: str) -> str:
+    """Expand acronyms so TF-IDF can match full-text chunks."""
+    tokens = query.lower().split()
+    expanded = []
+    for t in tokens:
+        clean = t.strip("?.,!")
+        if clean in ACRONYMS:
+            expanded.append(ACRONYMS[clean])
+        else:
+            expanded.append(t)
+    expanded_str = " ".join(expanded)
+    # If anything was expanded, append original too for overlap
+    if expanded_str != query.lower():
+        return f"{query} {expanded_str}"
+    return query
+
+
+
 
 # ── Lightweight TF-IDF vector store ──────────────────────────────────────────
 
@@ -58,19 +100,14 @@ class TFIDFVectorStore:
 # ── Gemini API — multi-key rotation + model fallback ─────────────────────────
 
 def _get_keys(primary_key: str) -> list:
-    """Load all keys from Streamlit secrets — handles both naming styles:
-    GEMINI_API_KEY1 / GEMINI_API_KEY2 (no underscore)
-    GEMINI_API_KEY_2 / GEMINI_API_KEY_3 (with underscore)
-    """
+    """Load all keys — handles GEMINI_API_KEY1 and GEMINI_API_KEY_2 styles."""
     keys = [primary_key] if primary_key else []
     try:
         import streamlit as st
-        # Style 1: GEMINI_API_KEY1, GEMINI_API_KEY2 ... (no underscore)
         for i in range(1, 8):
             k = st.secrets.get(f"GEMINI_API_KEY{i}", "")
             if k and k not in keys:
                 keys.append(k)
-        # Style 2: GEMINI_API_KEY_2, GEMINI_API_KEY_3 ... (with underscore)
         for i in range(2, 8):
             k = st.secrets.get(f"GEMINI_API_KEY_{i}", "")
             if k and k not in keys:
@@ -190,7 +227,7 @@ class StudyBuddyAgent:
         return chunks
 
     def retrieve(self, query, k=TOP_K):
-        return "\n\n---\n\n".join(self.store.query(query, k=k))
+        return "\n\n---\n\n".join(self.store.query(expand_query(query), k=k))
 
     def retrieve_conceptual(self, k=8):
         queries = [
@@ -300,7 +337,7 @@ All 5 questions. Never stop early."""
 
     def check_answer(self, student_answer: str, context: str) -> str:
         system = """Check the quiz answer. State ✅ Correct! or ❌ Incorrect.
-Give a full explanation (2-3 sentences): what the correct answer is and why.
+Brief explanation + correct answer if wrong + tip.
 End with: Topic: [2-3 word concept]. Max 4 sentences."""
         try:
             return call_gemini(self.api_key, system,
