@@ -10,7 +10,7 @@ import fitz  # PyMuPDF
 CHUNK_SIZE    = 600
 CHUNK_OVERLAP = 100
 TOP_K         = 5
-GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"]
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
 GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
