@@ -55,55 +55,73 @@ class TFIDFVectorStore:
         return [self.chunks[i] for i, _ in scores[:min(k, len(self.chunks))]]
 
 
-# ── Gemini API — simple, works with both AIza and AQ. keys ───────────────────
+# ── Gemini API — multi-key rotation + model fallback ─────────────────────────
+
+def _get_keys(primary_key: str) -> list:
+    """Load all keys from Streamlit secrets (GEMINI_API_KEY through _7)."""
+    keys = [primary_key] if primary_key else []
+    try:
+        import streamlit as st
+        for i in range(2, 8):
+            k = st.secrets.get(f"GEMINI_API_KEY_{i}", "")
+            if k and k not in keys:
+                keys.append(k)
+    except Exception:
+        pass
+    return [k for k in keys if k and len(k) > 10]
+
 
 def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) -> str:
+    """Try all keys across all models. Keys rotated on quota exhaustion."""
     payload = json.dumps({
         "system_instruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user}]}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2}
     }).encode("utf-8")
 
+    keys = _get_keys(api_key)
     last_error = None
-    for model in GEMINI_MODELS:
-        url = GEMINI_URL.format(model=model)
-        # Both AIza and AQ. keys use ?key= parameter (NOT Bearer token)
-        full_url = url + f"?key={api_key}"
-        headers  = {"Content-Type": "application/json"}
 
-        req = urllib.request.Request(full_url, data=payload,
-                                     headers=headers, method="POST")
-        for attempt in range(2):
-            try:
-                with urllib.request.urlopen(req, timeout=40) as resp:
-                    result = json.loads(resp.read().decode())
-                    return result["candidates"][0]["content"]["parts"][0]["text"]
-            except urllib.error.HTTPError as e:
-                body = e.read().decode()
-                if e.code == 404:
-                    last_error = f"[{model}] not found"
+    for key in keys:
+        for model in GEMINI_MODELS:
+            url      = GEMINI_URL.format(model=model)
+            # Both AIza and AQ. keys use ?key= query param (NOT Bearer)
+            full_url = url + f"?key={key}"
+            headers  = {"Content-Type": "application/json"}
+            req      = urllib.request.Request(
+                full_url, data=payload, headers=headers, method="POST"
+            )
+            for attempt in range(2):
+                try:
+                    with urllib.request.urlopen(req, timeout=40) as resp:
+                        result = json.loads(resp.read().decode())
+                        return result["candidates"][0]["content"]["parts"][0]["text"]
+                except urllib.error.HTTPError as e:
+                    body = e.read().decode()
+                    if e.code == 404:
+                        last_error = f"[{model}] not found"
+                        break  # next model
+                    if e.code == 429:
+                        if "PerDay" in body or "quota" in body.lower():
+                            last_error = f"[{key[:12]}../{model}] quota exceeded"
+                            break  # next model (try next key)
+                        time.sleep(4 * (2 ** attempt))
+                        continue
+                    if e.code in [400, 401, 403]:
+                        last_error = f"[{key[:12]}..] auth error: {body[:80]}"
+                        break  # next model
+                    if e.code == 503 and attempt < 1:
+                        time.sleep(4)
+                        continue
+                    last_error = f"[{model}] HTTP {e.code}: {body[:60]}"
                     break
-                if e.code == 429:
-                    if "PerDay" in body or "quota" in body.lower():
-                        last_error = f"[{model}] daily quota exceeded"
-                        break
-                    time.sleep(4 * (2 ** attempt))
-                    continue
-                if e.code in [400, 401, 403]:
-                    last_error = f"[{model}] key error: {body[:100]}"
+                except Exception as ex:
+                    last_error = str(ex)
                     break
-                if e.code == 503 and attempt < 1:
-                    time.sleep(4)
-                    continue
-                last_error = f"[{model}] HTTP {e.code}: {body[:80]}"
-                break
-            except Exception as ex:
-                last_error = str(ex)
-                break
 
     raise RuntimeError(
-        f"Gemini failed. Last error: {last_error}\n"
-        "Go to aistudio.google.com/apikey → Create API key → update Streamlit secrets."
+        f"All keys and models exhausted. Last: {last_error}\n"
+        "Add more keys in Streamlit secrets as GEMINI_API_KEY_2 through _7."
     )
 
 
