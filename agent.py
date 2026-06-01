@@ -10,7 +10,7 @@ import fitz  # PyMuPDF
 CHUNK_SIZE    = 600
 CHUNK_OVERLAP = 100
 TOP_K         = 5
-GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
 GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
@@ -67,14 +67,9 @@ def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) ->
     last_error = None
     for model in GEMINI_MODELS:
         url = GEMINI_URL.format(model=model)
-        # Support both key formats
-        if api_key.startswith("AIza"):
-            full_url = url + f"?key={api_key}"
-            headers  = {"Content-Type": "application/json"}
-        else:
-            full_url = url
-            headers  = {"Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}"}
+        # Both AIza and AQ. keys use ?key= parameter (NOT Bearer token)
+        full_url = url + f"?key={api_key}"
+        headers  = {"Content-Type": "application/json"}
 
         req = urllib.request.Request(full_url, data=payload,
                                      headers=headers, method="POST")
