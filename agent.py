@@ -10,7 +10,7 @@ import fitz  # PyMuPDF
 CHUNK_SIZE    = 600
 CHUNK_OVERLAP = 100
 TOP_K         = 5
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"]
 GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
@@ -58,10 +58,19 @@ class TFIDFVectorStore:
 # ── Gemini API — multi-key rotation + model fallback ─────────────────────────
 
 def _get_keys(primary_key: str) -> list:
-    """Load all keys from Streamlit secrets (GEMINI_API_KEY through _7)."""
+    """Load all keys from Streamlit secrets — handles both naming styles:
+    GEMINI_API_KEY1 / GEMINI_API_KEY2 (no underscore)
+    GEMINI_API_KEY_2 / GEMINI_API_KEY_3 (with underscore)
+    """
     keys = [primary_key] if primary_key else []
     try:
         import streamlit as st
+        # Style 1: GEMINI_API_KEY1, GEMINI_API_KEY2 ... (no underscore)
+        for i in range(1, 8):
+            k = st.secrets.get(f"GEMINI_API_KEY{i}", "")
+            if k and k not in keys:
+                keys.append(k)
+        # Style 2: GEMINI_API_KEY_2, GEMINI_API_KEY_3 ... (with underscore)
         for i in range(2, 8):
             k = st.secrets.get(f"GEMINI_API_KEY_{i}", "")
             if k and k not in keys:
@@ -291,12 +300,12 @@ All 5 questions. Never stop early."""
 
     def check_answer(self, student_answer: str, context: str) -> str:
         system = """Check the quiz answer. State ✅ Correct! or ❌ Incorrect.
-Brief explanation + correct answer if wrong + tip.
+Give a full explanation (2-3 sentences): what the correct answer is and why.
 End with: Topic: [2-3 word concept]. Max 4 sentences."""
         try:
             return call_gemini(self.api_key, system,
                                f"Question:\n{context}\n\nStudent: {student_answer}",
-                               max_tokens=250)
+                               max_tokens=500)
         except RuntimeError as e:
             return f"❌ Error: {e}"
 
