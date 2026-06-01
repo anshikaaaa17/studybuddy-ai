@@ -10,35 +10,11 @@ import fitz  # PyMuPDF
 CHUNK_SIZE    = 600
 CHUNK_OVERLAP = 100
 TOP_K         = 5
-
-# ── Demo-safe model list ──────────────────────────────────────────────────────
-# Order: fastest/newest first, older models as fallbacks.
-# gemini-2.0-flash-lite has very high RPM — ideal last-resort fallback.
-GEMINI_MODELS = [
-    "gemini-2.0-flash",        # primary: fast, free tier 1500 req/day
-    "gemini-2.0-flash-lite",   # fallback 1: lighter, higher quota headroom
-    "gemini-1.5-flash",        # fallback 2: proven stable
-]
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-
-# ── Multi-key pool ────────────────────────────────────────────────────────────
-# Load extra demo keys from Streamlit secrets (GEMINI_API_KEY_2, _3, etc.)
-# Falls back gracefully if secrets not available (local dev).
-def _load_key_pool(primary_key: str) -> list:
-    """Return deduplicated list of API keys: primary first, then extras from secrets."""
-    keys = [primary_key] if primary_key else []
-    try:
-        import streamlit as st
-        for i in range(2, 8):  # looks for GEMINI_API_KEY_2 through _7
-            k = st.secrets.get(f"GEMINI_API_KEY_{i}", "")
-            if k and k not in keys:
-                keys.append(k)
-    except Exception:
-        pass
-    return keys
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"]
+GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
-# ────── Lightweight TF-IDF vector store ──────────────────────────────────────────────────────────
+# ── Lightweight TF-IDF vector store ──────────────────────────────────────────
 
 class TFIDFVectorStore:
     def __init__(self):
@@ -79,86 +55,67 @@ class TFIDFVectorStore:
         return [self.chunks[i] for i, _ in scores[:min(k, len(self.chunks))]]
 
 
-# ────── Gemini API — key pool × model fallback + exponential backoff ─────────────────────────────
-# Supports TWO key formats:
-#   AIzaSy...  → standard REST API key, sent as ?key= query param
-#   AQ....     → OAuth2 bearer token (new AI Studio format), sent as Authorization: Bearer header
-# Strategy: outer loop = keys, inner loop = models. On daily quota, move to next KEY.
-
-GEMINI_URL_BEARER = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
-def _make_request(model: str, key: str, data: bytes) -> urllib.request.Request:
-    """Build request supporting both AIzaSy (query param) and AQ. (Bearer token) key formats."""
-    if key.startswith("AIza"):
-        url     = GEMINI_URL.format(model=model, key=key)
-        headers = {"Content-Type": "application/json"}
-    else:
-        # AQ. / OAuth2 token — must use Authorization: Bearer header
-        url     = GEMINI_URL_BEARER.format(model=model)
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
-    return urllib.request.Request(url, data=data, headers=headers, method="POST")
-
+# ── Gemini API — simple, works with both AIza and AQ. keys ───────────────────
 
 def call_gemini(api_key: str, system: str, user: str, max_tokens: int = 1000) -> str:
-    payload = {
+    payload = json.dumps({
         "system_instruction": {"parts": [{"text": system}]},
-        "contents":           [{"role": "user", "parts": [{"text": user}]}],
-        "generationConfig":   {"maxOutputTokens": max_tokens, "temperature": 0.2}
-    }
-    key_pool   = _load_key_pool(api_key)
-    last_error = "no keys configured"
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2}
+    }).encode("utf-8")
 
-    for key in key_pool:
-        for model in GEMINI_MODELS:
-            data = json.dumps(payload).encode("utf-8")
-            req  = _make_request(model, key, data)
-            for attempt in range(3):
-                try:
-                    with urllib.request.urlopen(req, timeout=40) as resp:
-                        result = json.loads(resp.read().decode())
-                        return result["candidates"][0]["content"]["parts"][0]["text"]
-                except urllib.error.HTTPError as e:
-                    body = e.read().decode()
-                    if e.code == 401:
-                        last_error = (
-                            f"[key …{key[-4:]}] Authentication failed — "
-                            "your AQ. token has expired. Please refresh your key at "
-                            "aistudio.google.com and update it in Streamlit secrets."
-                        )
-                        break  # no point retrying same key, try next
-                    if e.code == 404:
-                        last_error = f"[{model}] not found on this key"
-                        break  # try next model (same key)
-                    if e.code == 429:
-                        is_daily = (
-                            "PerDay" in body
-                            or "per_day" in body.lower()
-                            or "quota" in body.lower()
-                            or "RESOURCE_EXHAUSTED" in body
-                        )
-                        if is_daily:
-                            last_error = f"[key …{key[-4:]}][{model}] daily quota exceeded"
-                            break  # exhausted this model on this key; try next model
-                        # Per-minute rate limit — wait and retry
-                        time.sleep(4 * (2 ** attempt))
-                        continue
-                    if e.code == 503 and attempt < 2:
-                        time.sleep(4 * (2 ** attempt))
-                        continue
-                    raise RuntimeError(f"Gemini API error {e.code}: {body[:200]}") from e
-        # All models exhausted on this key → try next key in pool
+    last_error = None
+    for model in GEMINI_MODELS:
+        url = GEMINI_URL.format(model=model)
+        # Support both key formats
+        if api_key.startswith("AIza"):
+            full_url = url + f"?key={api_key}"
+            headers  = {"Content-Type": "application/json"}
+        else:
+            full_url = url
+            headers  = {"Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}"}
+
+        req = urllib.request.Request(full_url, data=payload,
+                                     headers=headers, method="POST")
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=40) as resp:
+                    result = json.loads(resp.read().decode())
+                    return result["candidates"][0]["content"]["parts"][0]["text"]
+            except urllib.error.HTTPError as e:
+                body = e.read().decode()
+                if e.code == 404:
+                    last_error = f"[{model}] not found"
+                    break
+                if e.code == 429:
+                    if "PerDay" in body or "quota" in body.lower():
+                        last_error = f"[{model}] daily quota exceeded"
+                        break
+                    time.sleep(4 * (2 ** attempt))
+                    continue
+                if e.code in [400, 401, 403]:
+                    last_error = f"[{model}] key error: {body[:100]}"
+                    break
+                if e.code == 503 and attempt < 1:
+                    time.sleep(4)
+                    continue
+                last_error = f"[{model}] HTTP {e.code}: {body[:80]}"
+                break
+            except Exception as ex:
+                last_error = str(ex)
+                break
 
     raise RuntimeError(
-        f"All API keys and models exhausted. Last error: {last_error}\n"
-        "Add GEMINI_API_KEY_2 / _3 in Streamlit secrets, or wait until midnight UTC."
+        f"Gemini failed. Last error: {last_error}\n"
+        "Go to aistudio.google.com/apikey → Create API key → update Streamlit secrets."
     )
 
 
-# ────── Main agent class ────────────────────────────────────────────────────────────────────────
+# ── Main agent class ──────────────────────────────────────────────────────────
 
 class StudyBuddyAgent:
 
-    # Admin content patterns — chunks matching these are excluded from index
     ADMIN_PATTERNS = re.compile(
         r'(office hours|email:|@ntu\.edu\.sg|@e\.ntu|tutorial schedule|'
         r'lecture schedule|course outline|grading|assessment breakdown|'
@@ -168,37 +125,15 @@ class StudyBuddyAgent:
         re.IGNORECASE
     )
 
-    # Admin keywords for page-level filtering (consistent with _strip_admin_pages)
-    ADMIN_KEYWORDS = [
-        'office hours','email:','tutorial schedule','lecture schedule',
-        'course outline','grading','assessment','textbook','recommended reading',
-        'course coordinator','instructor','professor','guest lecture',
-        'attendance','plagiarism','academic integrity','late submission',
-        'course code','prerequisites','learning outcomes','nanyang','ntu','semester'
-    ]
-
     def __init__(self, api_key: str):
         self.api_key      = api_key
         self.store        = TFIDFVectorStore()
         self.doc_text     = ""
         self.total_chunks = 0
 
-    # ────── Ingestion ──────────────────────────────────────────────────────────────────────────
-
     def _is_admin_chunk(self, chunk: str) -> bool:
         hits = len(self.ADMIN_PATTERNS.findall(chunk))
         return hits >= 2 and len(chunk) < 700
-
-    def _is_admin_page(self, text: str) -> bool:
-        """Check if a full page should be filtered as admin content.
-        
-        Uses same logic as _strip_admin_pages() for consistency:
-        - Count admin keywords
-        - Filter if 3+ keywords AND page < 800 chars
-        """
-        body = text.lower()
-        hits = sum(1 for kw in self.ADMIN_KEYWORDS if kw in body)
-        return hits >= 3 and len(text.strip()) < 800
 
     def ingest_pdf(self, uploaded_file) -> int:
         pdf_bytes = uploaded_file.read()
@@ -207,7 +142,6 @@ class StudyBuddyAgent:
         for i, page in enumerate(doc):
             text = page.get_text("text").strip()
             if text:
-                # Strip stray markdown from PDF extraction
                 text = re.sub(r'\*{1,2}', '', text)
                 text = re.sub(r'_{1,2}', '', text)
                 pages.append(f"[Page {i+1}]\n{text}")
@@ -233,18 +167,14 @@ class StudyBuddyAgent:
             start = end - CHUNK_OVERLAP
         return chunks
 
-    # ────── Retrieval ──────────────────────────────────────────────────────────────────────────
-
     def retrieve(self, query, k=TOP_K):
         return "\n\n---\n\n".join(self.store.query(query, k=k))
 
-    def retrieve_conceptual(self, k=8) -> str:
-        """Pull chunks most likely to contain testable academic content."""
+    def retrieve_conceptual(self, k=8):
         queries = [
             "definition algorithm model method technique",
             "theory concept principle formula equation",
             "classification regression neural network learning",
-            "how does process step function work",
         ]
         seen, results = set(), []
         for q in queries:
@@ -256,10 +186,7 @@ class StudyBuddyAgent:
                 break
         return "\n\n---\n\n".join(results[:k])
 
-    # ────── Q&A ────────────────────────────────────────────────────────────────────────────────
-
     def summarise_by_slide(self) -> str:
-        """FIX #3: Use _is_admin_page() for consistent filtering across full pages."""
         parts = re.split(r'(\[Page \d+\])', self.doc_text)
         pages = []
         i = 0
@@ -267,8 +194,7 @@ class StudyBuddyAgent:
             if re.match(r'\[Page \d+\]', parts[i]) and i+1 < len(parts):
                 num  = int(re.search(r'\d+', parts[i]).group())
                 text = parts[i+1].strip()
-                # FIX: Use _is_admin_page(text) instead of _is_admin_chunk(text[:700])
-                if text and not self._is_admin_page(text):
+                if text and not self._is_admin_chunk(text[:700]):
                     pages.append((num, text))
                 i += 2
             else:
@@ -276,52 +202,44 @@ class StudyBuddyAgent:
         if not pages:
             return "No content pages found after filtering admin slides."
         combined = "".join(f"[Page {n}]\n{t[:300]}\n\n" for n, t in pages[:20])
-        system = """You are StudyBuddy AI. For each page, write ONE bullet with its real page number.
-Format: • **Page N:** [one sentence — key concept on this slide]
-Skip admin slides. One line per slide only."""
+        system = "For each page, write ONE bullet: • **Page N:** [key concept]. One line per page only."
         result = call_gemini(self.api_key, system, combined, max_tokens=1500)
         if len(pages) > 20:
-            result += f"\n\n*Showing first 20 of {len(pages)} content pages.*"
+            result += f"\n\n*Showing first 20 of {len(pages)} pages.*"
         return result
 
     def answer_question(self, question: str) -> str:
-        # Route slide-by-slide requests
         if any(p in question.lower() for p in
-               ["slide by slide", "slide-by-slide", "page by page", "each slide", "each page"]):
+               ["slide by slide", "page by page", "each slide", "each page"]):
             return self.summarise_by_slide()
 
-        # Handle filtered page range requests gracefully
         page_req = re.search(r'(?:slide|page)s?\s*([\d]+)\s*(?:-|to)\s*([\d]+)', question.lower())
         if page_req:
             lo, hi = int(page_req.group(1)), int(page_req.group(2))
             available = sorted(set(int(p) for p in re.findall(r'\[Page (\d+)\]', self.doc_text)))
             if available and hi < available[0]:
                 return (
-                    f"**Pages {lo}–{hi} were filtered out** — they contained course admin content "
-                    f"(cover page, instructor info, schedule) rather than lecture material.\n\n"
-                    f"First content page available: **Page {available[0]}**\n\n"
-                    f"Try asking about a topic instead, e.g. *'What is NLP?'*"
+                    f"**Pages {lo}–{hi} were filtered** (admin/cover content).\n\n"
+                    f"First content page: **Page {available[0]}**\n\n"
+                    f"Try asking about a topic instead."
                 )
 
         ctx    = self.retrieve(question)
         system = """You are StudyBuddy AI, an expert study assistant.
-
 RULES:
 1. Answer ONLY from the provided lecture context. Never hallucinate.
 2. Go straight to the answer — no greeting, no preamble.
 3. Only greet if the message is ONLY "hi" or "hello" with nothing else.
-4. For analogies/simple explanations: use context facts with real-world metaphors.
+4. For analogies: use context facts with real-world metaphors.
 5. If not in the slides, say so honestly.
 
-FORMAT:
-- Direct answer first.
-- Key concepts in **bold**.
-- Bullet points for lists.
-- End with: 📖 Source: [page or slide reference]"""
-        user = f"Context:\n{ctx}\n\nQuestion: {question}"
-        return call_gemini(self.api_key, system, user, max_tokens=1500)
-
-    # ────── Quiz ────────────────────────────────────────────────────────────────────────────────
+FORMAT: Direct answer → key concepts in **bold** → bullet points → 📖 Source: [page ref]"""
+        try:
+            return call_gemini(self.api_key, system,
+                               f"Context:\n{ctx}\n\nQuestion: {question}",
+                               max_tokens=1500)
+        except RuntimeError as e:
+            return f"❌ Error: {e}"
 
     def _validate_quiz(self, text: str) -> bool:
         q_count = len(re.findall(r'\*\*Q[1-5]\.', text))
@@ -334,106 +252,58 @@ FORMAT:
 
     def generate_quiz(self) -> str:
         ctx    = self.retrieve_conceptual(k=8)
-        system = """You are StudyBuddy AI generating a multiple-choice quiz.
-
-STRICT RULES:
-- Output EXACTLY 5 complete questions. Never stop before Q5.
-- ONLY test concepts, theory, algorithms, definitions — NEVER admin info, emails, names, dates.
-- Every question MUST have A) B) C) D) each on its own line.
-- Never cut off. D) must always appear.
-
+        system = """Generate exactly 5 MCQs from the content. ONLY test concepts/theory, never admin info.
 FORMAT:
 **Q1. [question]**
 A) [option]
 B) [option]
 C) [option]
 D) [option]
-*(Answer: X — one sentence reason)*
+*(Answer: X — reason)*
 
-Difficulty: Q1-Q2 easy, Q3-Q4 medium, Q5 hard."""
-
-        result = ""
-        for attempt in range(2):
-            extra = "" if attempt == 0 else f"\n\n[Attempt {attempt+1}: output ALL 5 questions with A B C D each.]"
-            try:
-                result = call_gemini(
-                    self.api_key, system,
-                    f"Generate all 5 questions from:\n\n{ctx}{extra}",
-                    max_tokens=2000
-                )
+All 5 questions. Never stop early."""
+        try:
+            for attempt in range(2):
+                extra = "" if attempt == 0 else "\n\n[Attempt 2: output ALL 5 with A B C D each]"
+                result = call_gemini(self.api_key, system,
+                                     f"Generate all 5 from:\n\n{ctx}{extra}",
+                                     max_tokens=2000)
                 if self._validate_quiz(result):
                     return result
-            except RuntimeError:
-                if attempt == 1:
-                    return "⚠️ Quiz generation failed. Please check your API quota and try again."
-        
-        if not self._validate_quiz(result):
-            result += "\n\n---\n⚠️ *Quiz may be incomplete. Click Generate again for a fresh quiz.*"
-        return result
+            if not self._validate_quiz(result):
+                result += "\n\n⚠️ *Quiz may be incomplete. Click Generate again.*"
+            return result
+        except RuntimeError as e:
+            return f"❌ Quiz failed: {e}"
 
     def check_answer(self, student_answer: str, context: str) -> str:
-        system = """You are StudyBuddy AI checking a quiz answer.
-State: ✅ Correct! or ❌ Incorrect.
-Brief explanation + correct answer if wrong + tip to remember it.
-End with: Topic: [2-3 word concept]
-Be encouraging. Max 4 sentences."""
-        return call_gemini(
-            self.api_key, system,
-            f"Question:\n{context}\n\nStudent answered: {student_answer}",
-            max_tokens=250
-        )
+        system = """Check the quiz answer. State ✅ Correct! or ❌ Incorrect.
+Brief explanation + correct answer if wrong + tip.
+End with: Topic: [2-3 word concept]. Max 4 sentences."""
+        try:
+            return call_gemini(self.api_key, system,
+                               f"Question:\n{context}\n\nStudent: {student_answer}",
+                               max_tokens=250)
+        except RuntimeError as e:
+            return f"❌ Error: {e}"
 
     def extract_topic(self, response: str):
         m = re.search(r'Topic:\s*\[?([\w\s\-]+)\]?', response, re.IGNORECASE)
         return m.group(1).strip() if m else "General Review"
 
-    # ────── Summary ────────────────────────────────────────────────────────────────────────────
-
-    def summarise(self) -> str:
-        clean  = self._strip_admin_pages(self.doc_text)
-        excerpt = clean[:6000]
-        if len(clean) > 6000:
-            excerpt += "\n\n[... document continues ...]"
-        system = """You are StudyBuddy AI creating exam-focused study notes.
-
-CRITICAL:
-- Technical/academic content ONLY — concepts, theories, algorithms, models.
-- IGNORE and DO NOT MENTION: instructor names, emails, schedules, textbooks, course codes, grading, admin.
-- Use clean markdown. Always close ** bold tags.
-
-Structure:
-## Key Topics
-[3-6 bullets — technical subjects only]
-
-## Core Concepts
-[**Concept**: one-sentence definition each]
-
-## Quick Revision Points
-[5-7 bullets — most important exam facts]
-
-## Likely Exam Questions
-1. [question]
-2. [question]
-3. [question]
-
----
-*Ask "summarise slide by slide" for a page-by-page breakdown.*"""
-        return call_gemini(
-            self.api_key, system,
-            f"Summarise — technical content only, ignore admin:\n\n{excerpt}",
-            max_tokens=1200
-        )
-
     def _strip_admin_pages(self, text: str) -> str:
-        """Filter admin pages using ADMIN_KEYWORDS for consistency."""
+        admin_kw = ['office hours','email:','tutorial schedule','lecture schedule',
+                    'course outline','grading','assessment','textbook',
+                    'course coordinator','instructor','professor','guest lecture',
+                    'attendance','plagiarism','academic integrity','late submission',
+                    'course code','prerequisites','nanyang','ntu','semester']
         pages  = re.split(r'(\[Page \d+\])', text)
         result = []
         i = 0
         while i < len(pages):
             if re.match(r'\[Page \d+\]', pages[i]) and i+1 < len(pages):
                 body = pages[i+1].lower()
-                hits = sum(1 for kw in self.ADMIN_KEYWORDS if kw in body)
-                # FIX #3: Consistent threshold (3+ keywords, <800 chars)
+                hits = sum(1 for kw in admin_kw if kw in body)
                 if hits >= 3 and len(pages[i+1].strip()) < 800:
                     i += 2
                     continue
@@ -443,3 +313,33 @@ Structure:
                 result.append(pages[i])
                 i += 1
         return ''.join(result)
+
+    def summarise(self) -> str:
+        clean   = self._strip_admin_pages(self.doc_text)
+        excerpt = clean[:6000]
+        if len(clean) > 6000:
+            excerpt += "\n\n[... document continues ...]"
+        system = """Create exam-focused study notes. Technical content ONLY — ignore all admin.
+
+## Key Topics
+[3-6 bullets — technical subjects only]
+
+## Core Concepts
+[**Concept**: one-sentence definition]
+
+## Quick Revision Points
+[5-7 bullets — key exam facts]
+
+## Likely Exam Questions
+1. [question]
+2. [question]
+3. [question]
+
+---
+*Ask "summarise slide by slide" for page-by-page breakdown.*"""
+        try:
+            return call_gemini(self.api_key, system,
+                               f"Summarise — technical only, ignore admin:\n\n{excerpt}",
+                               max_tokens=1200)
+        except RuntimeError as e:
+            return f"❌ Summary failed: {e}"
