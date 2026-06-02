@@ -329,10 +329,55 @@ with col_main:
             )
     if st.session_state.pdf_loaded and st.session_state.mode == "Q&A":
 
-        # Voice input widget
+        # Voice input widget - self contained mic + TTS
         if st.session_state.voice_enabled:
-            components.html(VOICE_COMPONENT, height=120)
-            st.caption("💡 After speaking, your transcription is auto-copied — paste it into the chat box below.")
+            last = st.session_state.last_response.replace('"',' ').replace("'",' ').replace('\n',' ').replace('`','')[:400] if st.session_state.last_response else ''
+            components.html(f"""<!DOCTYPE html><html><head><style>
+  body{{margin:0;padding:8px;font-family:sans-serif;background:transparent}}
+  .row{{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px}}
+  button{{padding:7px 14px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid}}
+  #m{{background:#1e3a5f;color:#93c5fd;border-color:#3b82f6}}
+  #m.on{{background:#7f1d1d;color:#fca5a5;border-color:#ef4444}}
+  #s{{background:#14392b;color:#6ee7b7;border-color:#10b981}}
+  #st{{font-size:12px;color:#6b7280;margin-top:4px}}
+  #box{{margin-top:6px;padding:8px;background:#f3f4f6;border-radius:8px;font-size:13px;color:#111;display:none}}
+</style></head><body>
+<div class="row">
+  <button id="m" onclick="tog()">🎤 Speak</button>
+  <button id="s" onclick="spk(`{last}`)">🔊 Read last answer</button>
+</div>
+<div id="st"></div>
+<div id="box"></div>
+<script>
+var rec=null,going=false;
+var m=document.getElementById('m'),st=document.getElementById('st'),box=document.getElementById('box');
+function tog(){{going?rec.stop():go()}}
+function go(){{
+  if(!window.SpeechRecognition&&!window.webkitSpeechRecognition){{st.textContent='❌ Use Chrome';return}}
+  var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  rec=new SR();rec.lang='en-US';rec.interimResults=true;
+  rec.onstart=function(){{going=true;m.textContent='🔴 Stop';m.className='on';st.textContent='Listening...';box.style.display='block';box.textContent='...'}};
+  rec.onresult=function(e){{box.textContent=Array.from(e.results).map(function(r){{return r[0].transcript}}).join('')}};
+  rec.onend=function(){{going=false;m.textContent='🎤 Speak';m.className='';var t=box.textContent;
+    if(t&&t!='...'){{navigator.clipboard.writeText(t).then(function(){{st.textContent='✅ Copied — paste into chat below ↓'}}).catch(function(){{st.textContent='✅ Transcribed — paste above into chat ↓'}})}}else{{st.textContent='No speech detected'}}}};
+  rec.onerror=function(e){{going=false;m.textContent='🎤 Speak';m.className='';st.textContent=e.error==='not-allowed'?'❌ Allow mic in browser settings':'❌ '+e.error}};
+  rec.start();
+}}
+function spk(t){{
+  if(!t){{st.textContent='No answer yet';return}}
+  if(!window.speechSynthesis){{st.textContent='❌ TTS not supported';return}}
+  speechSynthesis.cancel();
+  var u=new SpeechSynthesisUtterance(t.slice(0,500));
+  u.rate=0.92;u.lang='en-US';
+  var vs=speechSynthesis.getVoices();
+  var v=vs.find(function(x){{return x.lang.startsWith('en')&&x.localService}})||vs.find(function(x){{return x.lang.startsWith('en')}})||vs[0];
+  if(v)u.voice=v;
+  u.onstart=function(){{st.textContent='🔊 Speaking...'}};
+  u.onend=function(){{st.textContent=''}};
+  if(vs.length===0){{speechSynthesis.onvoiceschanged=function(){{var v2=speechSynthesis.getVoices()[0];if(v2)u.voice=v2;speechSynthesis.speak(u)}}}};else{{speechSynthesis.speak(u)}}
+}}
+</script></body></html>""", height=110)
+            st.caption("💡 Speak → transcript auto-copied → paste into chat. Click 🔊 to hear last answer.")
 
         prompt = st.chat_input("Ask anything about your slides...")
         if prompt:
