@@ -7,7 +7,26 @@ Voice-enabled via Web Speech API | Agent track | UCWS Singapore Hackathon 2026
 import streamlit as st
 import streamlit.components.v1 as components
 import os
+import io
 from agent import StudyBuddyAgent
+
+def tts_audio_bytes(text: str) -> bytes | None:
+    """Convert text to MP3 bytes via gTTS. Returns None if gTTS unavailable."""
+    try:
+        from gtts import gTTS
+        clean = (text
+                 .replace("**", "").replace("*", "").replace("#", "")
+                 .replace("`", "").replace(">", ""))
+        # Strip source citations
+        import re
+        clean = re.sub(r'Source:[^\n]*', '', clean).strip()[:800]
+        buf = io.BytesIO()
+        gTTS(text=clean, lang="en", slow=False).write_to_fp(buf)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        st.error(f"TTS error: {e}")
+        return None
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -55,125 +74,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Voice component HTML (Web Speech API) ─────────────────────────────────────
-VOICE_COMPONENT = """<!DOCTYPE html>
-<html>
-<head>
-<style>
-  body { margin: 0; padding: 8px; font-family: sans-serif; background: transparent; }
-  #voiceBtn {
-    background: #1e3a5f; color: #93c5fd;
-    border: 1px solid #3b82f6; padding: 8px 18px;
-    border-radius: 8px; font-size: 13px; font-weight: 600;
-    cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
-  }
-  #voiceBtn.listening { background: #7f1d1d; color: #fca5a5; border-color: #ef4444; animation: pulse 1s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
-  #status { font-size: 12px; color: #6b7280; margin-left: 8px; }
-  #box { margin-top: 8px; padding: 8px 12px; background: #f3f4f6; border-radius: 8px;
-         font-size: 13px; color: #111827; border: 1px solid #e5e7eb; display: none; min-height: 32px; }
-</style>
-</head>
-<body>
-<button id="voiceBtn" onclick="toggle()">🎤 Click to speak</button>
-<span id="status"></span>
-<div id="box"></div>
-<script>
-let rec = null, going = false;
-const btn = document.getElementById('voiceBtn');
-const st  = document.getElementById('status');
-const box = document.getElementById('box');
-
-function toggle() {
-  if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
-    st.textContent = '❌ Use Chrome for voice support.'; return;
-  }
-  going ? rec.stop() : start();
-}
-
-function start() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  rec = new SR();
-  rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = false;
-  rec.onstart = () => {
-    going = true;
-    btn.textContent = '🔴 Listening... click to stop';
-    btn.className = 'listening';
-    st.textContent = 'Speak now...';
-    box.style.display = 'block'; box.textContent = '...';
-  };
-  rec.onresult = e => {
-    box.textContent = Array.from(e.results).map(r => r[0].transcript).join('');
-  };
-  rec.onend = () => {
-    going = false;
-    btn.textContent = '🎤 Click to speak'; btn.className = '';
-    const txt = box.textContent;
-    if (txt && txt !== '...') {
-      navigator.clipboard.writeText(txt)
-        .then(() => st.textContent = '✅ Copied! Paste into chat below ↓')
-        .catch(() => st.textContent = '✅ Done — paste text above into chat ↓');
-    } else { st.textContent = 'No speech. Try again.'; }
-  };
-  rec.onerror = e => {
-    going = false; btn.textContent = '🎤 Click to speak'; btn.className = '';
-    st.textContent = e.error === 'not-allowed'
-      ? '❌ Mic blocked — allow mic in browser settings.'
-      : '❌ ' + e.error;
-  };
-  rec.start();
-}
-
-// TTS listener from parent
-window.addEventListener('message', e => {
-  if (!e.data || e.data.type !== 'sb_speak') return;
-  const text = e.data.text;
-  if (!window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
-  const clean = text.replace(/[#*_`]/g,'').replace(/Source:[^\n]*/g,'').trim().slice(0,600);
-  const speak = () => {
-    const u = new SpeechSynthesisUtterance(clean);
-    u.rate = 0.92; u.lang = 'en-US';
-    const vs = speechSynthesis.getVoices();
-    const v = vs.find(v=>v.lang.startsWith('en')&&v.localService)||vs.find(v=>v.lang.startsWith('en'))||vs[0];
-    if (v) u.voice = v;
-    speechSynthesis.speak(u);
-  };
-  speechSynthesis.getVoices().length ? speak() : (speechSynthesis.onvoiceschanged = speak);
-});
-</script>
-</body>
-</html>"""
 
 
-TTS_SCRIPT = """
-<script>
-window._sbSpeak = function(text) {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const clean = text
-        .replace(/\*\*([^*]+)\*\*/g, '$1')
-        .replace(/[#*_`>]/g, '')
-        .replace(/Source:[^\n]*/g, '')
-        .replace(/[^\x00-\x7F]/g, '')
-        .trim().slice(0, 600);
-    const doSpeak = () => {
-        const utt = new SpeechSynthesisUtterance(clean);
-        utt.rate = 0.92; utt.pitch = 1.0; utt.lang = 'en-US';
-        const vs = window.speechSynthesis.getVoices();
-        const v = vs.find(v => v.lang.startsWith('en') && v.localService)
-               || vs.find(v => v.lang.startsWith('en')) || vs[0];
-        if (v) utt.voice = v;
-        window.speechSynthesis.speak(utt);
-    };
-    if (window.speechSynthesis.getVoices().length === 0) {
-        window.speechSynthesis.onvoiceschanged = doSpeak;
-    } else { doSpeak(); }
-};
-// Legacy alias
-window.speakText = window._sbSpeak;
-</script>
-"""
+
+
+
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for key, default in {
@@ -309,75 +214,54 @@ with col_main:
                     unsafe_allow_html=True)
         st.caption(f"Loaded: **{st.session_state.pdf_name}**")
 
-        # Inject TTS script once
-        if st.session_state.voice_enabled:
-            components.html(TTS_SCRIPT, height=0)
-
         # Chat history
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # Speak last response button
-        # Speak last response button
+        # Read last answer aloud via gTTS
         if st.session_state.voice_enabled and st.session_state.last_response:
-            _tc = st.session_state.last_response.replace('"',' ').replace("'", ' ').replace('\n',' ').replace('`','')[:400]
-            components.html(
-                f'''<button onclick="Array.from(window.parent.document.querySelectorAll('iframe')).forEach(f=>{{try{{f.contentWindow.postMessage({{type:\'sb_speak\',text:\'{_tc}\'}},'*')}}catch(e){{}}}})" '''
-                'style="background:#1e3a5f;color:#93c5fd;border:1px solid #3b82f6;padding:6px 16px;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600;">🔊 Read last answer aloud</button>',
-                height=50
-            )
+            if st.button("🔊 Read last answer aloud"):
+                audio = tts_audio_bytes(st.session_state.last_response)
+                if audio:
+                    st.audio(audio, format="audio/mp3", autoplay=True)
+                else:
+                    st.warning("Install gTTS: `pip install gTTS`")
     if st.session_state.pdf_loaded and st.session_state.mode == "Q&A":
 
         # Voice input widget - self contained mic + TTS
         if st.session_state.voice_enabled:
-            last = st.session_state.last_response.replace('"',' ').replace("'",' ').replace('\n',' ').replace('`','')[:400] if st.session_state.last_response else ''
-            components.html(f"""<!DOCTYPE html><html><head><style>
-  body{{margin:0;padding:8px;font-family:sans-serif;background:transparent}}
-  .row{{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px}}
-  button{{padding:7px 14px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid}}
-  #m{{background:#1e3a5f;color:#93c5fd;border-color:#3b82f6}}
-  #m.on{{background:#7f1d1d;color:#fca5a5;border-color:#ef4444}}
-  #s{{background:#14392b;color:#6ee7b7;border-color:#10b981}}
-  #st{{font-size:12px;color:#6b7280;margin-top:4px}}
-  #box{{margin-top:6px;padding:8px;background:#f3f4f6;border-radius:8px;font-size:13px;color:#111;display:none}}
+            components.html("""<!DOCTYPE html><html><head><style>
+  body{margin:0;padding:8px;font-family:sans-serif;background:transparent}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px}
+  button{padding:7px 14px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid}
+  #m{background:#1e3a5f;color:#93c5fd;border-color:#3b82f6}
+  #m.on{background:#7f1d1d;color:#fca5a5;border-color:#ef4444}
+  #st{font-size:12px;color:#6b7280;margin-top:4px}
+  #box{margin-top:6px;padding:8px;background:#f3f4f6;border-radius:8px;font-size:13px;color:#111;display:none}
 </style></head><body>
 <div class="row">
   <button id="m" onclick="tog()">🎤 Speak</button>
-  <button id="s" onclick="spk(`{last}`)">🔊 Read last answer</button>
 </div>
 <div id="st"></div>
 <div id="box"></div>
 <script>
 var rec=null,going=false;
 var m=document.getElementById('m'),st=document.getElementById('st'),box=document.getElementById('box');
-function tog(){{going?rec.stop():go()}}
-function go(){{
-  if(!window.SpeechRecognition&&!window.webkitSpeechRecognition){{st.textContent='❌ Use Chrome';return}}
+function tog(){going?rec.stop():go()}
+function go(){
+  if(!window.SpeechRecognition&&!window.webkitSpeechRecognition){st.textContent='❌ Use Chrome';return}
   var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   rec=new SR();rec.lang='en-US';rec.interimResults=true;
-  rec.onstart=function(){{going=true;m.textContent='🔴 Stop';m.className='on';st.textContent='Listening...';box.style.display='block';box.textContent='...'}};
-  rec.onresult=function(e){{box.textContent=Array.from(e.results).map(function(r){{return r[0].transcript}}).join('')}};
-  rec.onend=function(){{going=false;m.textContent='🎤 Speak';m.className='';var t=box.textContent;
-    if(t&&t!='...'){{navigator.clipboard.writeText(t).then(function(){{st.textContent='✅ Copied — paste into chat below ↓'}}).catch(function(){{st.textContent='✅ Transcribed — paste above into chat ↓'}})}}else{{st.textContent='No speech detected'}}}};
-  rec.onerror=function(e){{going=false;m.textContent='🎤 Speak';m.className='';st.textContent=e.error==='not-allowed'?'❌ Allow mic in browser settings':'❌ '+e.error}};
+  rec.onstart=function(){going=true;m.textContent='🔴 Stop';m.className='on';st.textContent='Listening...';box.style.display='block';box.textContent='...'};
+  rec.onresult=function(e){box.textContent=Array.from(e.results).map(function(r){return r[0].transcript}).join('')};
+  rec.onend=function(){going=false;m.textContent='🎤 Speak';m.className='';var t=box.textContent;
+    if(t&&t!='...'){navigator.clipboard.writeText(t).then(function(){st.textContent='✅ Copied — paste into chat below ↓'}).catch(function(){st.textContent='✅ Transcribed — paste above into chat ↓'})}else{st.textContent='No speech detected'}};
+  rec.onerror=function(e){going=false;m.textContent='🎤 Speak';m.className='';st.textContent=e.error==='not-allowed'?'❌ Allow mic in browser settings':'❌ '+e.error};
   rec.start();
-}}
-function spk(t){{
-  if(!t){{st.textContent='No answer yet';return}}
-  if(!window.speechSynthesis){{st.textContent='❌ TTS not supported';return}}
-  speechSynthesis.cancel();
-  var u=new SpeechSynthesisUtterance(t.slice(0,500));
-  u.rate=0.92;u.lang='en-US';
-  var vs=speechSynthesis.getVoices();
-  var v=vs.find(function(x){{return x.lang.startsWith('en')&&x.localService}})||vs.find(function(x){{return x.lang.startsWith('en')}})||vs[0];
-  if(v)u.voice=v;
-  u.onstart=function(){{st.textContent='🔊 Speaking...'}};
-  u.onend=function(){{st.textContent=''}};
-  if(vs.length===0){{speechSynthesis.onvoiceschanged=function(){{var v2=speechSynthesis.getVoices()[0];if(v2)u.voice=v2;speechSynthesis.speak(u)}}}};else{{speechSynthesis.speak(u)}}
-}}
-</script></body></html>""", height=110)
-            st.caption("💡 Speak → transcript auto-copied → paste into chat. Click 🔊 to hear last answer.")
+}
+</script></body></html>""", height=90)
+            st.caption("💡 Speak → transcript auto-copied → paste into chat below. Use 🔊 button above to hear last answer.")
 
         prompt = st.chat_input("Ask anything about your slides...")
         if prompt:
@@ -403,21 +287,8 @@ function spk(t){{
                         else:
                             response = f"❌ Error: {err}"
                 st.markdown(response)
-                # Auto-speak via iframe postMessage (st.markdown strips scripts)
-                if st.session_state.voice_enabled:
-                    escaped = response.replace("'", " ").replace('"', ' ').replace("\n", " ").replace("`", "")[:500]
-                    components.html(
-                        f"""<script>
-                        Array.from(window.parent.document.querySelectorAll('iframe')).forEach(f=>{{
-                            try{{f.contentWindow.postMessage({{type:'sb_speak',text:'{escaped}'}},'*')}}catch(e){{}}
-                        }});
-                        </script>""",
-                        height=0,
-                    )
             st.session_state.messages.append({"role": "assistant", "content": response})
             st.session_state.last_response = response
-
-    # ── Quiz mode ─────────────────────────────────────────────────────────────
     elif st.session_state.pdf_loaded and st.session_state.mode == "Quiz":
         import re as _re
 
@@ -534,7 +405,7 @@ with col_tips:
                 "- *Give me a layman example of NLP*"
             )
             if st.session_state.voice_enabled:
-                st.markdown("---\n**🎤 Voice tips:**\n- Click the mic button\n- Speak clearly\n- Answer auto-reads after response")
+                st.markdown("---\n**🎤 Voice tips:**\n- Click the mic button\n- Speak clearly\n- Paste transcript into chat\n- Use 🔊 Read last answer aloud")
         elif st.session_state.mode == "Quiz":
             st.markdown(
                 "- Click Generate for 5 MCQs\n"
